@@ -1,0 +1,131 @@
+sudo cat run_lynis.sh 
+#!/bin/bash
+
+# Wrapper script to run Lynis script for each target separately
+
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <lynis_script.sh> <list.txt>"
+    exit 1
+fi
+
+LYNIS_SCRIPT="$1"
+LIST_FILE="$2"
+
+[[ ! -f "$LYNIS_SCRIPT" ]] && { echo "Error: Lynis script not found: $LYNIS_SCRIPT"; exit 1; }
+[[ ! -f "$LIST_FILE" ]] && { echo "Error: list file not found: $LIST_FILE"; exit 1; }
+
+while read -r target ; do
+    [[ -z "$target" || "$target" =~ ^# ]] && continue
+    
+    echo ">>> Running Lynis script for $target"
+
+    # Create temporary file for this host
+    TMP_FILE=$(mktemp)
+    echo "$target" > "$TMP_FILE"
+
+    # Call Lynis script passing temp file as argument
+    sudo bash "$LYNIS_SCRIPT" "$TMP_FILE"
+
+    # Remove temporary file
+    rm -f "$TMP_FILE"
+done < "$LIST_FILE"
+
+sudo cat lynis_V2_clean.sh 
+#!/bin/bash
+set -e
+set -u
+if [[ "${BASH_VERSION%%.*}" -ge 3 ]]; then
+    set -o pipefail
+fi
+
+CENTRAL_REPORTS_DIR="/opt/audit/reports"
+REMOTE_LYNIS_DIR="/tmp/lynis_scans"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="/opt/audit/logs/lynis_automation_${TIMESTAMP}.log"
+
+mkdir -p "$CENTRAL_REPORTS_DIR" /opt/audit/logs /opt/audit/processed
+
+log() {
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+execute_remote_lynis() {
+    local target="$1"
+    local hostname
+    hostname=$(ssh "$target" hostname 2>/dev/null || echo "unknown")
+
+    log "${BLUE}[INFO]${NC} Starting Lynis scan on $target ($hostname)"
+
+    ssh -n -t "$target" "
+        if ! command -v lynis &> /dev/null; then
+            echo 'Installing Lynis...'
+            sudo apt update && sudo apt install lynis -y
+        fi
+        mkdir -p /tmp/lynis_scans
+        cd /tmp/lynis_scans
+
+		#lynis audit system \
+        #	--logfile /tmp/lynis_scans/lynis_scan.log \
+         #   --report-file /tmp/lynis_scans/lynis_data.dat \
+          #  --no-colors --quick || true
+        chown \$(whoami):\$(whoami) lynis_* || true
+        echo 'Lynis scan completed successfully'
+    "
+}
+
+retrieve_scan_results() {
+    local target="$1" 
+    local target_sanitized="${target//@/_}"
+    log "${BLUE}[INFO]${NC} Retrieving scan results from $target"
+    mkdir -p "$CENTRAL_REPORTS_DIR/${target_sanitized}_${TIMESTAMP}/" 
+    scp "$target:/tmp/lynis_scans/lynis*" "$CENTRAL_REPORTS_DIR/${target_sanitized}_${TIMESTAMP}" 2>/dev/null \
+        && echo "Successful transmission" \
+        || echo "Failed to retrieve files"
+}
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: $0 <file_with_user_ip_and_key>"
+        exit 1
+    fi
+
+    local file="$1"
+    [[ ! -f "$file" ]] && { echo "Error: file not found"; exit 1; }
+
+    log "${BLUE}[INFO]${NC} Starting Lynis automation"
+
+    while read -r target ; do
+        [[ -z "$target" || "$target" =~ ^# ]] && continue
+        log "${BLUE}[INFO]${NC} Processing target: $target"
+        if execute_remote_lynis "$target" ; then
+            if retrieve_scan_results "$target" ; then
+                echo "Retrieving data successfully from $target"
+            else
+                echo "Failed to retrieve data from $target"
+            fi
+        else
+            log "${RED}[ERROR]${NC} Failed to execute Lynis on $target"
+        fi
+	done < "$file"
+}
+
+main "$@"
+udo bash run_lynis.sh lynis_V2_clean.sh list.txt 
+>>> Running Lynis script for ubuntu
+[2025-08-02 18:34:03] [INFO] Starting Lynis automation
+[2025-08-02 18:34:03] [INFO] Processing target: ubuntu
+[2025-08-02 18:34:07] [INFO] Starting Lynis scan on ubuntu (unknown)
+Pseudo-terminal will not be allocated because stdin is not a terminal.
+ssh: connect to host ubuntu port 22: No route to host
+[2025-08-02 18:34:10] [ERROR] Failed to execute Lynis on ubuntu
+>>> Running Lynis script for kali
+[2025-08-02 18:34:10] [INFO] Starting Lynis automation
+[2025-08-02 18:34:10] [INFO] Processing target: kali
+root@kali's password: 
+
